@@ -5,6 +5,7 @@ from twisted.internet import protocol
 from twisted.application import strports, service, internet
 from twisted.web import server, static, resource, http
 from .. import __version__
+from ..database import get_db
 
 SECONDS = 1.0
 MINUTE = 60*SECONDS
@@ -67,10 +68,11 @@ WELCOME = {
 class Channel(resource.Resource):
     isLeaf = True # I handle /CHANNEL-ID/*
 
-    def __init__(self, channel_id, relay):
+    def __init__(self, channel_id, relay, db):
         resource.Resource.__init__(self)
         self.channel_id = channel_id
         self.relay = relay
+        self.db = db
         self.expire_at = time.time() + CHANNEL_EXPIRATION_TIME
         self.sides = set()
         self.messages = [] # (side, msgnum, str)
@@ -151,7 +153,8 @@ class Allocator(resource.Resource):
     def render_POST(self, request):
         side = request.postpath[0]
         channel_id = self.relay.allocate_channel_id()
-        self.relay.channels[channel_id] = Channel(channel_id, self.relay)
+        self.relay.channels[channel_id] = Channel(channel_id, self.relay,
+                                                  self.relay.db)
         log.msg("allocated #%d, now have %d channels" %
                 (channel_id, len(self.relay.channels)))
         request.setHeader("content-type", "application/json; charset=utf-8")
@@ -168,8 +171,9 @@ class ChannelList(resource.Resource):
                            "channel-ids": self.channel_ids})+"\n"
 
 class Relay(resource.Resource):
-    def __init__(self):
+    def __init__(self, db):
         resource.Resource.__init__(self)
+        self.db = db
         self.channels = {}
 
     def prune_old_channels(self):
@@ -209,7 +213,7 @@ class Relay(resource.Resource):
         if not channel_id in self.channels:
             log.msg("claimed #%d, now have %d channels" %
                     (channel_id, len(self.channels)))
-            self.channels[channel_id] = Channel(channel_id, self)
+            self.channels[channel_id] = Channel(channel_id, self, self.db)
         return self.channels[channel_id]
 
     def free_child(self, channel_id):
@@ -346,11 +350,12 @@ class Root(resource.Resource):
 class RelayServer(service.MultiService):
     def __init__(self, relayport, transitport):
         service.MultiService.__init__(self)
+        self.db = get_db("relay.sqlite")
         self.root = Root()
         site = server.Site(self.root)
         self.relayport_service = strports.service(relayport, site)
         self.relayport_service.setServiceParent(self)
-        self.relay = Relay() # accessible from tests
+        self.relay = Relay(self.db) # accessible from tests
         self.root.putChild("wormhole-relay", self.relay)
         t = internet.TimerService(5*MINUTE, self.relay.prune_old_channels)
         t.setServiceParent(self)
